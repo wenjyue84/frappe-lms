@@ -57,11 +57,14 @@
 
 {% macro logo_section(title=null) %}
 <div class="page-card-head">
-	<img class="app-logo" src="{{ logo }}">
+	<svg class="app-logo" width="42" height="42" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+		<rect width="24" height="24" rx="6" fill="#16a34a"/>
+		<path d="M7 8h10M7 12h7M7 16h10" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+	</svg>
 	{% if title %}
 	<h4>{{ _(title)}}</h4>
 	{% else %}
-	<h4>{{ _('Login to {0}').format(app_name or _("Frappe")) }}</h4>
+	<h4>Login to Learning Management System</h4>
 	{% endif %}
 </div>
 {% endmacro %}
@@ -255,6 +258,9 @@
 			</form>
 		</div>
 	</section>
+	<p style="text-align:center;font-size:11px;color:#aaa;margin-top:24px;letter-spacing:.2px;">
+		Developed by <strong style="color:#888;">Prisma Technology Solution Sdn Bhd</strong>
+	</p>
 </div>
 {% endblock %}
 
