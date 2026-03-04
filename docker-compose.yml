@@ -1,0 +1,168 @@
+version: "3.8"
+
+# Shared config for all services that run frappe
+x-backend: &backend
+  build:
+    context: .
+  volumes:
+    - sites:/home/frappe/frappe-bench/sites
+  depends_on:
+    - redis-cache
+    - redis-queue
+
+services:
+  # ─── Infrastructure ───────────────────────────────────────────────────────
+
+  db:
+    image: mariadb:10.6
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-character-set-client-handshake
+      - --skip-innodb-read-only-compressed
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      test: mysqladmin ping -h localhost --password=$$MYSQL_ROOT_PASSWORD
+      interval: 2s
+      retries: 30
+
+  redis-cache:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-cache-data:/data
+
+  redis-queue:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-queue-data:/data
+
+  # ─── Init containers (run once, then exit) ────────────────────────────────
+
+  configurator:
+    <<: *backend
+    restart: "no"
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        bench set-config -g db_host db
+        bench set-config -gp db_port 3306
+        bench set-config -g redis_cache "redis://redis-cache:6379"
+        bench set-config -g redis_queue "redis://redis-queue:6379"
+        bench set-config -g redis_socketio "redis://redis-queue:6379"
+        bench set-config -gp socketio_port 9000
+
+  create-site:
+    <<: *backend
+    restart: "no"
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        # Wait for MariaDB
+        until mysqladmin ping -h db --password=${DB_ROOT_PASSWORD} --silent 2>/dev/null; do
+          echo "Waiting for MariaDB..."; sleep 2
+        done
+        # Wait for configurator
+        until python3 -c "import json; json.load(open('sites/common_site_config.json'))['db_host']" 2>/dev/null; do
+          echo "Waiting for configurator..."; sleep 2
+        done
+        # Create site if it doesn't exist
+        if [ ! -f "sites/${SITE_NAME}/site_config.json" ]; then
+          echo "Creating site ${SITE_NAME}..."
+          bench new-site \
+            --no-mariadb-socket \
+            --admin-password=${ADMIN_PASSWORD} \
+            --db-root-password=${DB_ROOT_PASSWORD} \
+            --install-app lms \
+            --set-default ${SITE_NAME}
+          echo "Building assets..."
+          bench build --app frappe --app lms --production
+          echo "Copying assets (replacing symlinks with real files for nginx)..."
+          cd sites/assets
+          for item in *; do
+            if [ -L "$$item" ]; then
+              target=$$(readlink -f "$$item")
+              rm "$$item"
+              cp -rp "$$target" "$$item"
+            fi
+          done
+          cd /home/frappe/frappe-bench
+          echo "Site ready."
+        else
+          echo "Site ${SITE_NAME} already exists. Skipping."
+        fi
+    environment:
+      SITE_NAME: ${SITE_NAME}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+
+  # ─── Application services ─────────────────────────────────────────────────
+
+  backend:
+    <<: *backend
+    restart: unless-stopped
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+
+  websocket:
+    <<: *backend
+    restart: unless-stopped
+    command: ["node", "/home/frappe/frappe-bench/apps/frappe/socketio.js"]
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+
+  scheduler:
+    <<: *backend
+    restart: unless-stopped
+    command: ["bench", "schedule"]
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+
+  queue-short:
+    <<: *backend
+    restart: unless-stopped
+    command: ["bench", "worker", "--queue", "short,default"]
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+
+  queue-long:
+    <<: *backend
+    restart: unless-stopped
+    command: ["bench", "worker", "--queue", "long,default,short"]
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+
+  # ─── Frontend (nginx proxy) ───────────────────────────────────────────────
+
+  frontend:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-8001}:8080"
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+
+volumes:
+  db-data:
+  redis-cache-data:
+  redis-queue-data:
+  sites:
